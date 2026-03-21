@@ -1508,6 +1508,8 @@ function submitVerification(key, reward, type){
   if(tasksDone[key]) return;
   data.pendingVerifications.push({ key:key, reward:reward, type:type, ig:loggedUser, submittedAt:Date.now(), status:'pending' });
   saveUserData(loggedUser, data);
+  // Save full user data to Firestore so admin can see pendingVerifications from any device
+  _db_saveUser(loggedUser, data);
   renderTasks();
   updateGiveSteps();
   showVerifModal(key, reward);
@@ -1545,6 +1547,46 @@ function showVerifModal(key, reward){
 }
 
 function adminApproveVerif(targetUser, key, reward){
+  // If Firebase available, load fresh user data from Firestore
+  if (window._db) {
+    _db_getUser(targetUser).then(function(cloudData) {
+      var data = cloudData || getUserData(targetUser) || initUserData(targetUser);
+      if(!data.tasksDone) data.tasksDone = {};
+      data.tasksDone[key] = true;
+      if(!data.freeBalance) data.freeBalance = 0;
+      data.freeBalance += reward;
+      if(data.pendingVerifications){
+        data.pendingVerifications.forEach(function(v){ if(v.key===key && v.status==='pending') v.status='approved'; });
+      }
+      if(!data.pendingNotifications) data.pendingNotifications = [];
+      data.pendingNotifications.push({ type:'task_approved', key:key, reward:reward, approvedAt:Date.now(), seen:false });
+      // Save to both localStorage and Firestore
+      saveUserData(targetUser, data);
+      _db_saveUser(targetUser, {
+        tasksDone: data.tasksDone,
+        freeBalance: data.freeBalance,
+        pendingVerifications: data.pendingVerifications,
+        pendingNotifications: data.pendingNotifications
+      });
+      if(targetUser === loggedUser){
+        tasksDone[key] = true;
+        freeBalance = data.freeBalance;
+        var el = document.getElementById('free-balance');
+        if(el) el.textContent = fmtGTA(freeBalance) + ' GTA$';
+        renderTasks(); updateGiveSteps();
+      }
+      showToast('✅ Follow odobren!', targetUser + ' +' + fmtGTA(reward) + ' GTA$');
+      renderAdminPanel();
+    }).catch(function() {
+      // Fallback to localStorage
+      _adminApproveVerifLocal(targetUser, key, reward);
+    });
+    return;
+  }
+  _adminApproveVerifLocal(targetUser, key, reward);
+}
+
+function _adminApproveVerifLocal(targetUser, key, reward){
   var data = getUserData(targetUser);
   if(!data) return;
   if(!data.tasksDone) data.tasksDone = {};
@@ -1564,6 +1606,8 @@ function adminApproveVerif(targetUser, key, reward){
     if(el) el.textContent = fmtGTA(freeBalance) + ' GTA$';
     renderTasks(); updateGiveSteps();
   }
+  showToast('✅ Follow odobren!', targetUser + ' +' + fmtGTA(reward) + ' GTA$');
+  renderAdminPanel();
 }
 
 function checkPendingNotifications(){
