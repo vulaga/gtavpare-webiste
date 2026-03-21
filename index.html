@@ -2563,6 +2563,21 @@ function _buildAdminPanel(fsOrders, fsUsers) {
     guestOrders = fsOrders.filter(function(o){ return (o.username||o.user||'__guest__') === '__guest__'; });
   }
 
+  // Merge fsUsers data (pendingVerifications, pendingWithdrawals, etc.)
+  if (fsUsers && fsUsers.length > 0) {
+    fsUsers.forEach(function(fu) {
+      var existing = allUsers.find(function(u){ return u.uname === fu.username; });
+      if (existing) {
+        // Merge extra fields from Firestore user doc
+        if (fu.pendingVerifications) existing.data.pendingVerifications = fu.pendingVerifications;
+        if (fu.pendingWithdrawals) existing.data.pendingWithdrawals = fu.pendingWithdrawals;
+      } else if (fu.pendingVerifications || fu.pendingWithdrawals) {
+        // User has verifications but no orders yet
+        allUsers.push({ uname: fu.username, data: fu });
+      }
+    });
+  }
+
   var totalOrders = allUsers.reduce(function(a,u){return a+u.data.orders.length;},0) + guestOrders.length;
   var totalGTA = allUsers.reduce(function(a,u){return a+(u.data.totalGTA||0);},0)
     + guestOrders.reduce(function(a,o){return a+(o.amount||0);},0);
