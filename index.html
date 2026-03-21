@@ -649,7 +649,13 @@ footer{padding:48px 16px 32px}
         window._fs.limit(20)
       );
       const snap = await window._fs.getDocs(q);
-      return snap.docs.map(d => d.data());
+      return snap.docs.map(d => {
+        const data = d.data();
+        // Convert Firestore Timestamp to ms for wall
+        if (data.createdAt && data.createdAt.toMillis) data.time = data.createdAt.toMillis();
+        else if (data.createdAt && data.createdAt.seconds) data.time = data.createdAt.seconds * 1000;
+        return data;
+      });
     } catch(e) { return null; }
   }
 
@@ -665,6 +671,15 @@ footer{padding:48px 16px 32px}
       return snap.docs.map(d => d.data());
     } catch(e) { return null; }
   }
+
+  // Get all users from Firestore (for admin panel)
+  window._db_getAllUsers = async function() {
+    if (!window._db) return null;
+    try {
+      const snap = await window._fs.getDocs(window._fs.collection(window._db, 'users'));
+      return snap.docs.map(d => ({ username: d.id, ...d.data() }));
+    } catch(e) { return null; }
+  };
 
   // Subscribe to live wall updates
   window._startWallListener = function(callback) {
@@ -1642,7 +1657,49 @@ function getRefLink(u){ var base=(window.location.hostname==='localhost'||window
 function detectIncomingRef(){ var p=new URLSearchParams(window.location.search),r=p.get('ref'); if(r){try{localStorage.setItem('gtavpare_ref',r);}catch(e){}} }
 function getStoredRef(){ try{return localStorage.getItem('gtavpare_ref')||'';}catch(e){return '';} }
 function resolveRefOwner(code){ try{for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(k&&k.startsWith('gtavpare_user_')){var u=k.replace('gtavpare_user_','');if(getRefCode(u)===code)return u;}}}catch(e){} return null; }
-function creditReferrer(amt){ var rc=getStoredRef(); if(!rc)return; var owner=resolveRefOwner(rc); if(!owner||owner===loggedUser)return; var d=getUserData(owner)||initUserData(owner); if(!d.refEarnings)d.refEarnings=0; if(!d.refCount)d.refCount=0; d.refEarnings+=Math.floor(amt*0.05); d.refCount+=1; try{localStorage.setItem('gtavpare_user_'+owner,JSON.stringify(d));}catch(e){} try{localStorage.removeItem('gtavpare_ref');}catch(e){} }
+
+async function creditReferrerAsync(amt) {
+  var rc = getStoredRef();
+  if (!rc) return;
+  var earned = Math.floor(amt * 0.05);
+
+  // Try to find owner via Firestore (cross-device)
+  if (window._db && window._db_getAllUsers) {
+    try {
+      var allUsers = await window._db_getAllUsers();
+      if (allUsers) {
+        var owner = null;
+        for (var i = 0; i < allUsers.length; i++) {
+          if (getRefCode(allUsers[i].username) === rc) { owner = allUsers[i].username; break; }
+        }
+        if (owner && owner !== loggedUser) {
+          var ownerData = allUsers.find(function(u){ return u.username === owner; }) || {};
+          ownerData.refEarnings = (ownerData.refEarnings || 0) + earned;
+          ownerData.refCount = (ownerData.refCount || 0) + 1;
+          ownerData.freeBalance = (ownerData.freeBalance || 0) + earned;
+          await _db_saveUser(owner, { refEarnings: ownerData.refEarnings, refCount: ownerData.refCount, freeBalance: ownerData.freeBalance });
+          try { localStorage.removeItem('gtavpare_ref'); } catch(e) {}
+          return;
+        }
+      }
+    } catch(e) {}
+  }
+
+  // Fallback: localStorage only
+  var owner = resolveRefOwner(rc);
+  if (!owner || owner === loggedUser) return;
+  var d = getUserData(owner) || initUserData(owner);
+  if (!d.refEarnings) d.refEarnings = 0;
+  if (!d.refCount) d.refCount = 0;
+  d.refEarnings += earned;
+  d.refCount += 1;
+  d.freeBalance = (d.freeBalance || 0) + earned;
+  try { localStorage.setItem('gtavpare_user_' + owner, JSON.stringify(d)); } catch(e) {}
+  _db_saveUser(owner, { refEarnings: d.refEarnings, refCount: d.refCount, freeBalance: d.freeBalance });
+  try { localStorage.removeItem('gtavpare_ref'); } catch(e) {}
+}
+
+function creditReferrer(amt){ creditReferrerAsync(amt); }
 function updateRefUI(){ var lo=document.getElementById('ref-logged-out'),li=document.getElementById('ref-logged-in'),inp=document.getElementById('ref-link-input'),stats=document.getElementById('ref-stats-label'); if(!lo||!li)return; if(loggedUser){lo.style.display='none';li.style.display='flex';if(inp)inp.value=getRefLink(loggedUser);if(stats){var d=getUserData(loggedUser);var cnt=(d&&d.refCount)||0;var earned=(d&&d.refEarnings)||0;stats.textContent=cnt+' referral(s) · '+fmtGTA(earned)+' GTA$ zaradjeno';}}else{lo.style.display='block';li.style.display='none';} }
 function copyRef(){ var link=loggedUser?getRefLink(loggedUser):window.location.href; navigator.clipboard?.writeText(link).catch(()=>{}); showToast(t('freeCopied'),t('freeCopiedDesc')); }
 detectIncomingRef();
@@ -2153,7 +2210,12 @@ function renderRecentWall() {
   var staticData = [{name:'BalkanKing99',amount:5000000,mins:2},{name:'SrpskiGamer',amount:10000000,mins:5},{name:'ZagreBoss',amount:2000000,mins:12}];
   var rows = '';
   wall.forEach(function(o) {
-    var el = Math.floor((Date.now()-o.time)/60000);
+    // Handle Firestore Timestamp, number, or missing
+    var ts_ms = o.time;
+    if (ts_ms && typeof ts_ms === 'object' && ts_ms.toMillis) ts_ms = ts_ms.toMillis();
+    if (ts_ms && typeof ts_ms === 'object' && ts_ms.seconds) ts_ms = ts_ms.seconds * 1000;
+    if (!ts_ms || isNaN(ts_ms)) ts_ms = Date.now();
+    var el = Math.floor((Date.now()-ts_ms)/60000);
     var ts = fmtMins(el);
     var sc = o.status==='delivered' ? 'var(--primary)' : '#f59e0b';
     var sl = o.status==='delivered' ? t('statusDelivered') : t('statusPending');
@@ -2393,22 +2455,64 @@ function checkAdminPw() {
 function renderAdminPanel() {
   var existing = document.getElementById('admin-overlay');
   if (existing) existing.remove();
+  // Load from Firestore if available
+  if (window._db) {
+    Promise.all([
+      _db_getAdminOrders().catch(function(){ return []; }),
+      (window._db_getAllUsers ? window._db_getAllUsers() : Promise.resolve(null))
+    ]).then(function(results) {
+      _buildAdminPanel(results[0] || [], results[1] || null);
+    }).catch(function() { _buildAdminPanel([], null); });
+    // Show loading placeholder
+    var ov = document.createElement('div');
+    ov.id = 'admin-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center';
+    ov.innerHTML = '<div style="color:#fff;font-size:18px">Loading...</div>';
+    document.body.appendChild(ov);
+    return;
+  }
+  _buildAdminPanel([], null);
+}
+
+function _buildAdminPanel(fsOrders, fsUsers) {
+  var existing = document.getElementById('admin-overlay');
+  if (existing) existing.remove();
   var wall = getWall();
   var allUsers = [];
-  try {
-    for (var i=0; i<localStorage.length; i++) {
-      var key = localStorage.key(i);
-      if (key && key.startsWith('gtavpare_user_')) {
-        var uname = key.replace('gtavpare_user_','');
-        var data = getUserData(uname);
-        if (data && data.orders) allUsers.push({uname:uname,data:data});
+  // Use Firestore users if available (for verifications/withdrawals)
+  if (fsUsers && fsUsers.length > 0) {
+    allUsers = fsUsers.map(function(u) {
+      return { uname: u.username, data: u };
+    });
+  } else {
+    try {
+      for (var i=0; i<localStorage.length; i++) {
+        var key = localStorage.key(i);
+        if (key && key.startsWith('gtavpare_user_')) {
+          var uname = key.replace('gtavpare_user_','');
+          var data = getUserData(uname);
+          if (data && data.orders) allUsers.push({uname:uname,data:data});
+        }
       }
-    }
-  } catch(e){}
+    } catch(e){}
+  }
 
   // Load guest orders
   var guestOrders = [];
   try { guestOrders = JSON.parse(localStorage.getItem('gtavpare_guest_orders')||'[]'); } catch(e){}
+
+  // Merge Firestore orders (source of truth)
+  if (fsOrders && fsOrders.length > 0) {
+    var fsUserMap = {};
+    fsOrders.forEach(function(o) {
+      var uname = o.username || o.user || '__guest__';
+      if (!fsUserMap[uname]) fsUserMap[uname] = {uname:uname, data:{orders:[], totalGTA:0}};
+      fsUserMap[uname].data.orders.push(o);
+      fsUserMap[uname].data.totalGTA = (fsUserMap[uname].data.totalGTA||0) + (o.amount||0);
+    });
+    allUsers = Object.values(fsUserMap).filter(function(u){ return u.uname !== '__guest__'; });
+    guestOrders = fsOrders.filter(function(o){ return (o.username||o.user||'__guest__') === '__guest__'; });
+  }
 
   var totalOrders = allUsers.reduce(function(a,u){return a+u.data.orders.length;},0) + guestOrders.length;
   var totalGTA = allUsers.reduce(function(a,u){return a+(u.data.totalGTA||0);},0)
